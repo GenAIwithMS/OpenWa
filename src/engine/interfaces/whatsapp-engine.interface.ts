@@ -610,7 +610,10 @@ export interface IWhatsAppEngine {
    * Download media for a specific message identified by its message id within a chat.
    * Returns the media (base64) + mimetype, or null if the message has no media or it cannot be downloaded.
    */
-  downloadMessageMedia(chatId: string, messageId: string): Promise<{ mimetype: string; data: string; filename?: string } | null>;
+  downloadMessageMedia(
+    chatId: string,
+    messageId: string,
+  ): Promise<{ mimetype: string; data: string; filename?: string } | null>;
 
   // Calls
   /**

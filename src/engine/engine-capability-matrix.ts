@@ -62,6 +62,11 @@ export const ENGINE_CAPABILITY_MATRIX: Record<string, MethodCapability> = {
   deleteChat: { wwjs: { status: 'supported' }, baileys: { status: 'supported' } },
   deleteMessage: { wwjs: { status: 'supported' }, baileys: { status: 'supported' } },
   deleteStatus: { wwjs: { status: 'supported' }, baileys: { status: 'supported' } },
+  downloadMessageMedia: {
+    wwjs: { status: 'supported' },
+    baileys: { status: 'not-available', rootCause: 'library-limitation' },
+    evidence: 'baileys has no synchronous message fetch; only fetchMessageHistory (event-delivered)',
+  },
   demoteParticipants: { wwjs: { status: 'supported' }, baileys: { status: 'supported' } },
   destroy: { wwjs: { status: 'supported' }, baileys: { status: 'supported' } },
   disconnect: { wwjs: { status: 'supported' }, baileys: { status: 'supported' } },

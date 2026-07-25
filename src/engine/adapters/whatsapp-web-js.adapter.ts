@@ -510,12 +510,12 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
     // Map wwebjs type to HKDF info string and output length
     const hkdfConfig: Record<string, { info: string; length: number }> = {
-      image:    { info: 'WhatsApp Image Keys',    length: 112 },
-      video:    { info: 'WhatsApp Video Keys',    length: 112 },
-      audio:    { info: 'WhatsApp Audio Keys',    length: 112 },
-      ptt:      { info: 'WhatsApp Ptt Keys',      length: 80 },
+      image: { info: 'WhatsApp Image Keys', length: 112 },
+      video: { info: 'WhatsApp Video Keys', length: 112 },
+      audio: { info: 'WhatsApp Audio Keys', length: 112 },
+      ptt: { info: 'WhatsApp Ptt Keys', length: 80 },
       document: { info: 'WhatsApp Document Keys', length: 80 },
-      sticker:  { info: 'WhatsApp Sticker Keys',  length: 40 },
+      sticker: { info: 'WhatsApp Sticker Keys', length: 40 },
     };
     const cfg = hkdfConfig[type] ?? { info: 'WhatsApp Document Keys', length: 80 };
     this.logger.log('downloadMediaDirect: HKDF config', { msgId, type, info: cfg.info, hkdfLen: cfg.length });
@@ -530,7 +530,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     let encrypted: Buffer;
     try {
       encrypted = await new Promise<Buffer>((resolve, reject) => {
-        const req = https.get(url, (res) => {
+        const req = https.get(url, res => {
           if (res.statusCode !== 200) {
             reject(new Error(`CDN returned ${res.statusCode}`));
             return;
@@ -548,8 +548,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
             resolve(buf);
           });
         });
-        req.on('error', (e) => reject(new Error(`CDN request error: ${e.message}`)));
-        req.on('timeout', () => { req.destroy(); reject(new Error('CDN timeout')); });
+        req.on('error', e => reject(new Error(`CDN request error: ${e.message}`)));
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error('CDN timeout'));
+        });
         req.setTimeout(15000);
       });
     } catch (err) {
@@ -583,9 +586,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     // No HMAC is appended — the HMAC verification is done server-side by WhatsApp.
     // Strip the last 10 bytes before decrypting.
     const trailerLen = 10;
-    const ciphertext = encrypted.length > trailerLen
-      ? encrypted.subarray(0, encrypted.length - trailerLen)
-      : encrypted;
+    const ciphertext = encrypted.length > trailerLen ? encrypted.subarray(0, encrypted.length - trailerLen) : encrypted;
 
     this.logger.log('downloadMediaDirect: preparing decrypt', {
       msgId,
@@ -2314,7 +2315,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
           this.logger.warn(`Failed to resolve quoted message for ${msg.id._serialized}: ${String(error)}`);
         }
       }
-      if (includeMedia && (msg.hasMedia || ['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msg.type))) {
+      if (
+        includeMedia &&
+        (msg.hasMedia || ['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msg.type))
+      ) {
         try {
           // Same pre-gate + limiter as live media: a large historical blob shouldn't bloat the response/heap.
           const capped = await this.capInboundMediaFor(msg);
@@ -2328,7 +2332,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     return results;
   }
 
-  async downloadMessageMedia(chatId: string, messageId: string): Promise<{ mimetype: string; data: string; filename?: string } | null> {
+  async downloadMessageMedia(
+    chatId: string,
+    messageId: string,
+  ): Promise<{ mimetype: string; data: string; filename?: string } | null> {
     this.ensureReady();
     try {
       const chat = await this.client!.getChatById(chatId);
@@ -2344,7 +2351,6 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       if (media) {
         return { mimetype: media.mimetype, data: media.data, filename: media.filename ?? undefined };
       }
-      const raw = (msg as unknown as { _data: Record<string, unknown> })._data;
       const directMedia = await this.downloadMediaDirect(msg);
       if (directMedia) {
         return { mimetype: directMedia.mimetype, data: directMedia.data, filename: directMedia.filename ?? undefined };

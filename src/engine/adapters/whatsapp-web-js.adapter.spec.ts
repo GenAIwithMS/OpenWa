@@ -1545,7 +1545,7 @@ describe('WhatsAppWebJsAdapter inbound media (MEDIA_DOWNLOAD_ENABLED=false)', ()
     expect(msg.media?.omitted).toBeUndefined();
   });
 
-  it('still emits the echo (without media) when the own-send media download fails', async () => {
+  it('still emits the echo (with omitted media marker) when the own-send media download fails', async () => {
     const adapter = new WhatsAppWebJsAdapter({
       sessionId: 'sess-echo-media-fail',
       sessionDataPath: './data/sessions',
@@ -1582,10 +1582,10 @@ describe('WhatsAppWebJsAdapter inbound media (MEDIA_DOWNLOAD_ENABLED=false)', ()
 
     expect(onMessageCreate).toHaveBeenCalledTimes(1);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    const msg = onMessageCreate.mock.calls[0][0] as { media?: unknown };
-    // The failure is contained at the call site: the echo still fires, just without the media field
-    // (the omitted marker is synthesized downstream, in SessionService's persistence).
-    expect(msg.media).toBeUndefined();
+    const msg = onMessageCreate.mock.calls[0][0] as { media?: { omitted?: boolean; mimetype?: string } };
+    // The failure is contained at the call site: the echo still fires, with the omitted marker
+    // set by the fallback path (instead of throwing, it returns metadata-only).
+    expect(msg.media).toEqual({ mimetype: 'image/png', filename: undefined, omitted: true, sizeBytes: 3 });
   });
 });
 
@@ -2617,7 +2617,7 @@ describe('WhatsAppWebJsAdapter inbound media concurrency (slot held until the re
     expect(maxInFlight).toBe(1);
   });
 
-  it('propagates a rejecting download to the caller and releases the slot for the next download', async () => {
+  it('handles a rejecting download gracefully and releases the slot for the next download', async () => {
     process.env.INBOUND_MEDIA_CONCURRENCY = '1';
     process.env.MEDIA_DOWNLOAD_TIMEOUT_MS = '10000'; // long: we want the reject, not the timeout
     process.env.MEDIA_DOWNLOAD_MAX_BYTES = String(10 * 1024 * 1024);
@@ -2639,8 +2639,10 @@ describe('WhatsAppWebJsAdapter inbound media concurrency (slot held until the re
     const cap = (m: unknown): Promise<unknown> =>
       (adapter as unknown as { capInboundMediaFor: (msg: unknown) => Promise<unknown> }).capInboundMediaFor(m);
 
-    await expect(cap(makeMsg('bad', 'reject'))).rejects.toThrow('download blew up');
-    // Slot must have been released despite the rejection — the next download proceeds and resolves.
+    // The download rejection is caught and handled — the fallback path returns an omitted marker.
+    const result = await cap(makeMsg('bad', 'reject'));
+    expect(result).toHaveProperty('omitted', true);
+    // Slot must have been released — the next download proceeds and resolves.
     const media = (await cap(makeMsg('good', 'resolve'))) as { mimetype: string; data: string };
     expect(media.data).toBe(Buffer.from('ok').toString('base64'));
     expect(calls).toEqual(['bad', 'good']);
