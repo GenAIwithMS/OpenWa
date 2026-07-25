@@ -137,6 +137,7 @@ async function bootstrap() {
   let signalReceived = false;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => {
+      console.error(`[SIGNAL] Received ${signal} from ${new Error().stack?.split('\n')[3]?.trim() || 'unknown'}`);
       if (signalReceived) {
         process.exit(130);
       }

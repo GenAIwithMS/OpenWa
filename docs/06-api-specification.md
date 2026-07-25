@@ -847,6 +847,32 @@ Returns a bare array of `MessageReaction`:
 
 **Errors:** `400` session not active · `401` missing/invalid API key · `500` engine error
 
+#### GET /api/sessions/:sessionId/messages/:chatId/:messageId/media
+
+Download media (image, video, document, audio, sticker) for a specific message. Returns the base64-encoded data, MIME type, and optional filename. Uses puppeteer-based `downloadMedia()` first; falls back to direct CDN download + AES-256-CBC decryption via Node.js `crypto` when puppeteer fails (common for privacy-id/LID users).
+
+**Auth:** API key
+
+**Path parameters**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| sessionId | string | Session ID |
+| chatId | string | Chat ID containing the message |
+| messageId | string | Message ID to download media for |
+
+**Response** `200`
+
+```json
+{
+  "mimetype": "application/pdf",
+  "data": "JVBERi0xLjcN...base64-encoded...==",
+  "filename": "document.pdf"
+}
+```
+
+**Errors:** `401` missing/invalid API key · `404` message not found or has no downloadable media · `500` engine error
+
 #### GET /api/sessions/:sessionId/messages/batch/:batchId
 
 Get the processing status and progress of a bulk batch.

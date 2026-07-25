@@ -49,6 +49,7 @@ export class ShutdownService {
 
     const delay = Math.min(delayMs ?? this.resolveDelay(), MAX_SHUTDOWN_DELAY_MS);
     this.logger.log('Graceful shutdown requested', { delayMs: delay });
+    console.error('>>> SHUTDOWN CALLED FROM:', new Error().stack?.split('\n').slice(2).join('\n'));
 
     setTimeout(() => {
       this.logger.log('Initiating shutdown...');

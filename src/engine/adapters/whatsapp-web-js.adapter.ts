@@ -390,6 +390,16 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         sizeBytes: declared,
       };
     }
+    // Bypass wwebjs hasMedia false for LID users: wwebjs sets hasMedia from
+    // Boolean(_data.directPath), but for LID users _data comes from the event
+    // payload which lacks directPath. However, the full protobuf inside the
+    // page context (WAWebCollections.Msg.get) DOES have directPath.
+    // Setting hasMedia=true lets downloadMedia() proceed to the puppeteer
+    // evaluate which resolves the real directPath from the page context.
+    const msgType = (msg as unknown as { _data?: { type?: string } })._data?.type;
+    if (!msg.hasMedia && msgType && ['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msgType)) {
+      (msg as unknown as { hasMedia: boolean }).hasMedia = true;
+    }
     // msg.downloadMedia() can't be aborted, so freeing the slot the moment the wall-clock deadline fires
     // would admit a fresh download while the abandoned one is still materialising in heap — letting the
     // number of in-flight downloads exceed inboundMediaConcurrency(). Instead, HOLD the slot until the real
@@ -411,7 +421,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
               msgId: msg.id._serialized,
             },
           ),
-        ),
+        ).catch(() => null),
       );
       // Keep the slot occupied until the underlying download truly settles, not the timeout race.
       return download.then(
@@ -431,6 +441,30 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
     const media = await boundedReady;
     if (!media) {
+      // Fallback: puppeteer-based download failed (common for LID users).
+      // Try direct download + decryption using Node.js crypto, bypassing puppeteer.
+      const directMedia = await this.downloadMediaDirect(msg);
+      if (directMedia) {
+        this.logger.log('Direct media download succeeded (fallback from puppeteer)', {
+          msgId: msg.id._serialized,
+        });
+        const capped = capInboundMedia({
+          mimetype: directMedia.mimetype,
+          filename: directMedia.filename || undefined,
+          sizeBytes: Buffer.byteLength(directMedia.data, 'base64'),
+          toBase64: () => directMedia.data,
+        });
+        if (capped.omitted) {
+          this.logger.warn('Direct-downloaded media exceeds byte cap; dropped payload', {
+            msgId: msg.id._serialized,
+            sizeBytes: capped.sizeBytes,
+          });
+        }
+        return capped;
+      }
+      this.logger.warn('Direct media download also failed; emitting without media', {
+        msgId: msg.id._serialized,
+      });
       return {
         mimetype: data?.mimetype ?? '',
         filename: data?.filename || undefined,
@@ -451,6 +485,142 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       });
     }
     return capped;
+  }
+
+  /**
+   * Download and decrypt media directly from WhatsApp's CDN using Node.js crypto,
+   * bypassing puppeteer evaluate (which fails for LID/privacy-id users).
+   * Returns null when the message has no downloadable media or decryption fails.
+   */
+  private async downloadMediaDirect(msg: Message): Promise<MessageMedia | null> {
+    const raw = (msg as unknown as { _data: Record<string, unknown> })._data;
+    const directPath = raw?.directPath as string | undefined;
+    const mediaKeyB64 = raw?.mediaKey as string | undefined;
+    const mimetype = (raw?.mimetype as string) ?? '';
+    const filename = raw?.filename as string | undefined;
+    const type = (raw?.type as string) ?? '';
+    const msgId = msg.id?._serialized ?? 'unknown';
+
+    if (!directPath || !mediaKeyB64) {
+      this.logger.debug('downloadMediaDirect: skipped — missing directPath or mediaKey', { msgId });
+      return null;
+    }
+
+    this.logger.log('downloadMediaDirect: starting', { msgId, type, mimetype, filename });
+
+    // Map wwebjs type to HKDF info string and output length
+    const hkdfConfig: Record<string, { info: string; length: number }> = {
+      image:    { info: 'WhatsApp Image Keys',    length: 112 },
+      video:    { info: 'WhatsApp Video Keys',    length: 112 },
+      audio:    { info: 'WhatsApp Audio Keys',    length: 112 },
+      ptt:      { info: 'WhatsApp Ptt Keys',      length: 80 },
+      document: { info: 'WhatsApp Document Keys', length: 80 },
+      sticker:  { info: 'WhatsApp Sticker Keys',  length: 40 },
+    };
+    const cfg = hkdfConfig[type] ?? { info: 'WhatsApp Document Keys', length: 80 };
+    this.logger.log('downloadMediaDirect: HKDF config', { msgId, type, info: cfg.info, hkdfLen: cfg.length });
+
+    const crypto = await import('crypto');
+    const https = await import('https');
+
+    // Download encrypted blob from WhatsApp CDN
+    const url = `https://mmg.whatsapp.net${directPath}`;
+    this.logger.log('downloadMediaDirect: fetching CDN', { msgId, url: url.replace(/\/[^/]+$/, '/...') });
+
+    let encrypted: Buffer;
+    try {
+      encrypted = await new Promise<Buffer>((resolve, reject) => {
+        const req = https.get(url, (res) => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`CDN returned ${res.statusCode}`));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            this.logger.log('downloadMediaDirect: CDN response', {
+              msgId,
+              statusCode: res.statusCode,
+              contentLength: res.headers['content-length'],
+              receivedBytes: buf.length,
+            });
+            resolve(buf);
+          });
+        });
+        req.on('error', (e) => reject(new Error(`CDN request error: ${e.message}`)));
+        req.on('timeout', () => { req.destroy(); reject(new Error('CDN timeout')); });
+        req.setTimeout(15000);
+      });
+    } catch (err) {
+      this.logger.error(`downloadMediaDirect: CDN download failed — ${String(err)}`);
+      return null;
+    }
+
+    if (encrypted.length % 16 !== 0) {
+      this.logger.warn('downloadMediaDirect: encrypted length not block-aligned', {
+        msgId,
+        encryptedLength: encrypted.length,
+        mod16: encrypted.length % 16,
+      });
+    }
+
+    // Derive key material via HKDF-SHA256
+    const mediaKey = Buffer.from(mediaKeyB64, 'base64');
+    const info = Buffer.from(cfg.info, 'utf-8');
+    const salt = Buffer.alloc(0);
+    const derived = Buffer.from(crypto.hkdfSync('sha256', mediaKey, salt, info, cfg.length));
+    const iv = derived.subarray(0, 16);
+    const key = derived.subarray(16, 48);
+
+    this.logger.log('downloadMediaDirect: key derived', {
+      msgId,
+      mediaKeyLen: mediaKey.length,
+      derivedLen: derived.length,
+    });
+
+    // CDN returns AES-CBC ciphertext with a 10-byte trailing metadata frame.
+    // No HMAC is appended — the HMAC verification is done server-side by WhatsApp.
+    // Strip the last 10 bytes before decrypting.
+    const trailerLen = 10;
+    const ciphertext = encrypted.length > trailerLen
+      ? encrypted.subarray(0, encrypted.length - trailerLen)
+      : encrypted;
+
+    this.logger.log('downloadMediaDirect: preparing decrypt', {
+      msgId,
+      encryptedBytes: encrypted.length,
+      ciphertextBytes: ciphertext.length,
+      strippedTrailer: encrypted.length > trailerLen,
+    });
+
+    if (ciphertext.length % 16 !== 0) {
+      this.logger.warn('downloadMediaDirect: ciphertext not block-aligned after strip', {
+        msgId,
+        ciphertextBytes: ciphertext.length,
+        mod16: ciphertext.length % 16,
+      });
+    }
+
+    // Decrypt AES-256-CBC
+    try {
+      const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+
+      this.logger.log('downloadMediaDirect: decryption succeeded', {
+        msgId,
+        decryptedBytes: decrypted.length,
+      });
+
+      if (decrypted.length === 0) {
+        return null;
+      }
+
+      return new MessageMedia(mimetype, decrypted.toString('base64'), filename);
+    } catch (err) {
+      this.logger.error(`downloadMediaDirect: decryption failed — ${String(err)}`);
+      return null;
+    }
   }
 
   async initialize(callbacks: EngineEventCallbacks): Promise<void> {
@@ -666,7 +836,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         }
 
         // Handle media
-        if (msg.hasMedia) {
+        // whatsapp-web.js reports hasMedia=false for LID (privacy-id) users even when the
+        // message carries a document/image/etc. Check the message type as a fallback so media
+        // download is attempted regardless (#583, openwa/issues).
+        if (msg.hasMedia || ['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msg.type)) {
           try {
             const capped = await this.capInboundMediaFor(msg);
             if (capped) incomingMessage.media = capped;
@@ -713,7 +886,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         // Enrich with the media payload through the same capped path the incoming handler uses —
         // the base builder is sync and carries none, so a phone-sent image would otherwise persist
         // and render as a bare 📎 marker even though the media is downloadable right here.
-        if (msg.hasMedia) {
+        // Also check message type as fallback for LID users (hasMedia is false for them).
+        if (msg.hasMedia || ['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msg.type)) {
           try {
             incomingMessage.media = await this.capInboundMediaFor(msg);
           } catch (error) {
@@ -2094,7 +2268,19 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async getChatHistory(chatId: string, limit: number = 50, includeMedia: boolean = false): Promise<IncomingMessage[]> {
     this.ensureReady();
-    const chat = await this.client!.getChatById(chatId);
+    let chat;
+    try {
+      chat = await this.client!.getChatById(chatId);
+    } catch (error) {
+      this.logger.warn(`getChatHistory: getChatById failed for ${chatId} — ${String(error)}`);
+      return [];
+    }
+    // getChatById returns undefined for unknown chats (e.g. LID privacy-id chats that
+    // whatsapp-web.js can't resolve). Return empty rather than crashing with TypeError.
+    if (!chat) {
+      this.logger.warn(`Chat not found for getChatHistory: ${chatId}`);
+      return [];
+    }
     const messages = await chat.fetchMessages({ limit });
     const results: IncomingMessage[] = [];
     for (const msg of messages) {
@@ -2128,7 +2314,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
           this.logger.warn(`Failed to resolve quoted message for ${msg.id._serialized}: ${String(error)}`);
         }
       }
-      if (includeMedia && msg.hasMedia) {
+      if (includeMedia && (msg.hasMedia || ['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msg.type))) {
         try {
           // Same pre-gate + limiter as live media: a large historical blob shouldn't bloat the response/heap.
           const capped = await this.capInboundMediaFor(msg);
@@ -2140,6 +2326,34 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       results.push(out);
     }
     return results;
+  }
+
+  async downloadMessageMedia(chatId: string, messageId: string): Promise<{ mimetype: string; data: string; filename?: string } | null> {
+    this.ensureReady();
+    try {
+      const chat = await this.client!.getChatById(chatId);
+      if (!chat) return null;
+      const messages = await chat.fetchMessages({ limit: 100 });
+      const msg = messages.find(m => m.id._serialized === messageId || m.id.id === messageId);
+      if (!msg) return null;
+      if (!msg.hasMedia && !['image', 'video', 'document', 'audio', 'sticker', 'ptt'].includes(msg.type)) return null;
+      if (!msg.hasMedia) {
+        (msg as unknown as { _data: { isMedia: boolean } })._data.isMedia = true;
+      }
+      const media = await msg.downloadMedia();
+      if (media) {
+        return { mimetype: media.mimetype, data: media.data, filename: media.filename ?? undefined };
+      }
+      const raw = (msg as unknown as { _data: Record<string, unknown> })._data;
+      const directMedia = await this.downloadMediaDirect(msg);
+      if (directMedia) {
+        return { mimetype: directMedia.mimetype, data: directMedia.data, filename: directMedia.filename ?? undefined };
+      }
+      return null;
+    } catch (error) {
+      this.logger.warn(`downloadMessageMedia failed for ${messageId} in ${chatId} — ${String(error)}`);
+      return null;
+    }
   }
 
   // Delete Message

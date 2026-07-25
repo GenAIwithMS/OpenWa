@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Param, Body, Query, HttpCode, HttpStatus, NotFoundException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { MessageService } from './message.service';
 import { BulkMessageService } from './bulk-message.service';
@@ -338,6 +338,26 @@ export class MessageController {
     @Param('messageId') messageId: string,
   ) {
     return this.messageService.getMessageReactions(sessionId, chatId, messageId);
+  }
+
+  @Get(':chatId/:messageId/media')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Download media for a specific message' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'chatId', description: 'Chat ID containing the message' })
+  @ApiParam({ name: 'messageId', description: 'Message ID to download media for' })
+  @ApiResponse({ status: 200, description: 'Media data (base64)' })
+  @ApiResponse({ status: 404, description: 'Message not found or has no media' })
+  async downloadMessageMedia(
+    @Param('sessionId') sessionId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const result = await this.messageService.downloadMessageMedia(sessionId, chatId, messageId);
+    if (!result) {
+      throw new NotFoundException('Message not found or has no downloadable media');
+    }
+    return result;
   }
 
   // ========== Delete Message ==========

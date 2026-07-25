@@ -650,6 +650,11 @@ export class MessageService {
     return engine.getChatHistory(chatId, safeLimit, deep ? false : includeMedia);
   }
 
+  async downloadMessageMedia(sessionId: string, chatId: string, messageId: string) {
+    const engine = this.getEngine(sessionId);
+    return engine.downloadMessageMedia(chatId, messageId);
+  }
+
   // ========== Delete Message ==========
 
   async deleteMessage(

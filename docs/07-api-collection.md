@@ -234,6 +234,15 @@ curl "$BASE/api/sessions/my-session/628123456789@c.us/true_628123456789@c.us_3EB
   -H "X-API-Key: $API_KEY"
 ```
 
+#### GET /api/sessions/:sessionId/messages/:chatId/:messageId/media
+
+Download media (image, video, document, audio, sticker) for a specific message. Returns base64-encoded data, mimetype, and optional filename. Tries puppeteer-based download first, falls back to direct CDN download + AES-CBC decryption.
+
+```bash
+curl "$BASE/api/sessions/my-session/628123456789@c.us/true_628123456789@c.us_3EB0ABCD/media" \
+  -H "X-API-Key: $API_KEY"
+```
+
 #### GET /api/sessions/:sessionId/messages/batch/:batchId
 
 Get the status and progress of a bulk batch.
